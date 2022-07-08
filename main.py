@@ -8,11 +8,7 @@ from typing import Tuple, Generator
 from datetime import datetime, timedelta
 from pathlib import Path
 from video import NormalVideoCapture
-from PIL import Image
-import pytesseract
 import numpy as np
-from matplotlib import pyplot as plt
-from skimage.color import rgb2gray
 
 VIDEO_PATH = Path(__file__, '../../incoming_to_cut').resolve()
 CLEAR_TO_CUT = VIDEO_PATH / 'clear_to_cut'
@@ -28,9 +24,20 @@ def parse_video_file(file: Path) -> Tuple[datetime, int, int]:
     :return: The timestamp of when the recording started, the bed number and the FPS count
     :rtype: Tuple[datetime, int, int]
     """
-    assert file.suffix == '.ogv', f"Unexpected video file type: {file.suffix}"
     date_str, bed, fps = file.stem.rsplit('-', maxsplit=2)
     return parse(date_str), int(bed), int(fps[1:])
+
+def parse_video_clip_file(file: Path) -> Tuple[datetime, int, int, timedelta]:
+    """
+    Derives meta info from video clip filename
+
+    :param file: The path to the file
+    :type file: Path
+    :return: The timestamp of when the clip started, the bed number, the FPS count and the duration of the clip
+    :rtype: Tuple[datetime, int, int, timedelta]
+    """
+    date_str, bed, fps, dur = file.stem.rsplit('-', maxsplit=3)
+    return parse(date_str), int(bed), int(fps[1:]), timedelta(seconds=float(dur[1:])/100)
 
 def gen_all_videos(path: Path) -> Generator[Tuple[Path, datetime, int, int], None, None]:
     if path.is_dir():
@@ -41,22 +48,22 @@ def gen_all_videos(path: Path) -> Generator[Tuple[Path, datetime, int, int], Non
     else:
         raise Exception(f"Given path is neither a directory nor a file: {str(path)}")
 
-def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: int, fps: float, target_fps: int = 15, queue_padding_in_seconds: timedelta = timedelta(seconds=10.0)):
-    backSubKNN = cv2.createBackgroundSubtractorKNN(history=15, dist2Threshold=800.0, detectShadows=False)
-    def has_significant_change(frame: np.ndarray) -> bool:
+def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: int, fps: float, target_fps: int = 15, queue_padding_in_seconds: timedelta = timedelta(seconds=10.0), black_out_timestamps: bool = True):
+    def has_significant_change(frame: np.ndarray, last_frame: np.ndarray) -> bool:
         w, h, _ = frame.shape
         total_pixels = w * h
-        fgMaskKNN = backSubKNN.apply(frame, learningRate=0.7)
-        changed_pixel_cnt = float(np.count_nonzero(fgMaskKNN))
-        # print(v.time_read, changed_pixel_cnt/total_pixels)
-        return changed_pixel_cnt/total_pixels > 0.01  # bigger than 2 percent => change detected
+        current_frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        previous_frame_gray = cv2.cvtColor(last_frame, cv2.COLOR_BGR2GRAY)
+        frame_diff = cv2.absdiff(current_frame_gray, previous_frame_gray)
+        changed_pixel_cnt = np.count_nonzero(frame_diff > 5)
+        #print(v.time_read, changed_pixel_cnt/total_pixels)
+        return changed_pixel_cnt/total_pixels > 0.02  # bigger than 2 percent => change detected
     orig_fps = vcap.get(cv2.CAP_PROP_FPS)
     size = tuple(map(int, (vcap.get(cv2.CAP_PROP_FRAME_WIDTH), vcap.get(cv2.CAP_PROP_FRAME_HEIGHT))))
     assert int(orig_fps) == fps, "Video file indicated wrong FPS"
     v = NormalVideoCapture(vcap, target_fps)
     pad = (queue_padding_in_seconds.seconds * target_fps)
     backlog = Queue(maxsize=pad)
-    first_frame = True
     # vw = cv2.VideoWriter(str(out_folder / '00.avi'), fourcc=cv2.VideoWriter_fourcc(*'MJPG'), fps=target_fps, frameSize=size)
     # for _ in range(target_fps * 10):
     #     s, f = v.read()
@@ -64,20 +71,24 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
     #     vw.write(f)
     # vw.release()
     with tqdm(total=v.frames_left) as bar:
+        last_frame = None
         while True:
             # Search for changes for a new clip
             s, f = v.read()
             if not s:
                 bar.write("Finished")
                 break
+            if black_out_timestamps:
+                f[:8, :128, :] = np.zeros((8, 128, 3))
             bar.update()
             if backlog.full():
                 backlog.get()
             backlog.put(f)
-            if not has_significant_change(f) or first_frame:
-                first_frame = False
+            if last_frame is None:
+                last_frame = f
                 continue
-            first_frame = False
+            if not has_significant_change(f, last_frame):
+                continue
             start_frame_idx = v.frames_read - 1
             timestamp_indicator = v.time_read
 
@@ -86,6 +97,22 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
             t = date + start_offset
             bar.write(f" => T+{str(start_offset)} [frame {v.frames_read - 1}]: Found significant changes in video at {str(timestamp_indicator)} [frame {start_frame_idx}], starting from {str(t)}")
             filename = out_folder / f"{t.year}-{t.month:02}-{t.day:02}-{t.hour:02}{t.minute:02}{t.second:02}-{bed}-r{target_fps}.avi"
+            if filename.exists():
+                bar.write("  ==> Found an unfinished clip. Overwriting it.")
+                filename.unlink()
+            files = list(filename.parent.glob(f"{filename.stem}-*.avi"))
+            if len(files) > 1:
+                raise Exception(f"Found too many clips with the same timestamp: {files}")
+            elif len(files) == 1:
+                file = files[0]
+                bar.write(f"  ==> Found a clip with the same timestamp. Assuming it is from a previous run. Skipping.")
+                _, _, _, duration = parse_video_clip_file(file)
+                duration -= 2 * queue_padding_in_seconds
+                s, count = v.skip(duration)
+                if not s:
+                    bar.write("Failed to skip all frames!!!")
+                bar.update(count)
+                continue
             vw = cv2.VideoWriter(str(filename), fourcc=cv2.VideoWriter_fourcc(*'MJPG'), fps=target_fps, frameSize=size)
             while not backlog.empty():  # Write backlogged frames to file
                 vw.write(backlog.get())
@@ -95,14 +122,18 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
                 s, f = v.read()
                 bar.update()
                 if not s:
+                    last_frame = f
                     bar.write("EMPTY FRAME READ!!!")
                     break
+                if black_out_timestamps:
+                    f[:8, :128, :] = np.zeros((8, 128, 3))
                 vw.write(f)
                 if backlog.full():
                     backlog.get()
                 backlog.put(f)
-                if has_significant_change(f):  # We're not done yet. Extend the clip
+                if has_significant_change(f, last_frame):  # We're not done yet. Extend the clip
                     back_pad = 0
+                last_frame = f
             vw.release()
             frames_count = v.frames_read - start_frame_idx
             duration2 = timedelta(seconds=frames_count / v.target_fps)
