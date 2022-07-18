@@ -48,7 +48,7 @@ def gen_all_videos(path: Path) -> Generator[Tuple[Path, datetime, int, int], Non
     else:
         raise Exception(f"Given path is neither a directory nor a file: {str(path)}")
 
-def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: int, fps: float, target_fps: int = 15, queue_padding_in_seconds: timedelta = timedelta(seconds=10.0), black_out_timestamps: bool = True):
+def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: int, fps: float, target_fps: int = 15, queue_padding_in_seconds: timedelta = timedelta(seconds=10.0), black_out_timestamps: bool = False):
     def has_significant_change(frame: np.ndarray, last_frame: np.ndarray) -> bool:
         w, h, _ = frame.shape
         total_pixels = w * h
@@ -57,7 +57,7 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
         frame_diff = cv2.absdiff(current_frame_gray, previous_frame_gray)
         changed_pixel_cnt = np.count_nonzero(frame_diff > 5)
         #print(v.time_read, changed_pixel_cnt/total_pixels)
-        return changed_pixel_cnt/total_pixels > 0.02  # bigger than 2 percent => change detected
+        return changed_pixel_cnt/total_pixels > 0.03  # bigger than 3 percent => change detected
     orig_fps = vcap.get(cv2.CAP_PROP_FPS)
     size = tuple(map(int, (vcap.get(cv2.CAP_PROP_FRAME_WIDTH), vcap.get(cv2.CAP_PROP_FRAME_HEIGHT))))
     assert int(orig_fps) == fps, "Video file indicated wrong FPS"
@@ -96,7 +96,7 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
             start_offset = max(timestamp_indicator - queue_padding_in_seconds, timedelta(0))
             t = date + start_offset
             bar.write(f" => T+{str(start_offset)} [frame {v.frames_read - 1}]: Found significant changes in video at {str(timestamp_indicator)} [frame {start_frame_idx}], starting from {str(t)}")
-            filename = out_folder / f"{t.year}-{t.month:02}-{t.day:02}-{t.hour:02}{t.minute:02}{t.second:02}-{bed}-r{target_fps}.avi"
+            filename = out_folder / f"{t.year}-{t.month:02}-{t.day:02}-{t.hour:02}{t.minute:02}{t.second:02}-{bed:02}-r{target_fps}.avi"
             if filename.exists():
                 bar.write("  ==> Found an unfinished clip. Overwriting it.")
                 filename.unlink()
