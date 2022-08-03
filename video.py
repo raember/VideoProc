@@ -1,9 +1,8 @@
-import math
-
 import cv2
+import math
 import numpy as np
 from datetime import timedelta
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 v = cv2.VideoCapture()
 
@@ -110,18 +109,24 @@ class NormalVideoCapture(cv2.VideoCapture):
         new_f = cv2.addWeighted(self._cur_frame, weight, self._next_frame, 1.0 - weight, 0.0)
         return self._return_frame(new_f)
 
-    def skip(self, duration: timedelta) -> Tuple[bool, int]:
+    def skip(self, duration: timedelta, n_frame_backlog: int) -> Tuple[bool, int, List[np.ndarray]]:
         success = True
-        count = 0
-        for _ in range(int(duration.total_seconds() * self.fps)):
+        buf = []
+        start = self.frames_read
+        n_frames = int(duration.total_seconds() * self.fps)
+        for _ in range(n_frames - n_frame_backlog):
             success &= self.cap.grab()
-            count += 1
             self._orig_frames_read += 1
         # I hope this is accurate enough
         offset = duration.total_seconds() * self.target_fps
         self._cur_pos += offset
         self._next_pos += offset
-        return success, count
+        # Read interpolated frames again for backlog
+        for _ in range(n_frame_backlog):
+            s, f = self.read()
+            success &= s
+            buf.append(f)
+        return success, self.frames_read - start, buf
 
 def nth(n: int) -> str:
     s = str(n)

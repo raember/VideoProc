@@ -1,19 +1,21 @@
 import shutil
 
 import cv2
+import numpy as np
+from datetime import datetime, timedelta
 from dateutil.parser import parse
+from pathlib import Path
 from queue import Queue
 from tqdm import tqdm
 from typing import Tuple, Generator
-from datetime import datetime, timedelta
-from pathlib import Path
+
 from video import NormalVideoCapture
-import numpy as np
 
 VIDEO_PATH = Path(__file__, '../../incoming_to_cut').resolve()
 CLEAR_TO_CUT = VIDEO_PATH / 'clear_to_cut'
 VIDEO_ICP = CLEAR_TO_CUT / 'video_icp'
 AUTO_CUT = CLEAR_TO_CUT / 'auto_cut'
+MIN_SIGNIFICANT_FRAME_LENGTH = timedelta(seconds=5)
 
 def parse_video_file(file: Path) -> Tuple[datetime, int, int]:
     """
@@ -64,12 +66,6 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
     v = NormalVideoCapture(vcap, target_fps)
     pad = (queue_padding_in_seconds.seconds * target_fps)
     backlog = Queue(maxsize=pad)
-    # vw = cv2.VideoWriter(str(out_folder / '00.avi'), fourcc=cv2.VideoWriter_fourcc(*'MJPG'), fps=target_fps, frameSize=size)
-    # for _ in range(target_fps * 10):
-    #     s, f = v.read()
-    #     assert s
-    #     vw.write(f)
-    # vw.release()
     with tqdm(total=v.frames_left) as bar:
         last_frame = None
         while True:
@@ -105,18 +101,31 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
                 raise Exception(f"Found too many clips with the same timestamp: {files}")
             elif len(files) == 1:
                 file = files[0]
-                bar.write(f"  ==> Found a clip with the same timestamp. Assuming it is from a previous run. Skipping.")
                 _, _, _, duration = parse_video_clip_file(file)
-                duration -= 2 * queue_padding_in_seconds
-                s, count = v.skip(duration)
+                start_timestamp = timestamp_indicator - start_offset
+                duration -= start_timestamp
+                duration -= queue_padding_in_seconds
+                bar.write(
+                    f"  ==> Found a clip with the same timestamp ({duration.total_seconds():.2}s). Assuming it is from a previous run. Skipping {duration.total_seconds():.2}s.")
+                s, count, frames = v.skip(duration, pad)
+                for f in frames:  # Refill backlog
+                    if backlog.full():
+                        backlog.get()
+                    backlog.put(f)
                 if not s:
-                    bar.write("Failed to skip all frames!!!")
+                    bar.write("Failed to skip all frames!")
                 bar.update(count)
                 continue
             vw = cv2.VideoWriter(str(filename), fourcc=cv2.VideoWriter_fourcc(*'MJPG'), fps=target_fps, frameSize=size)
+            backlog_buf = []
             while not backlog.empty():  # Write backlogged frames to file
-                vw.write(backlog.get())
+                f = backlog.get()
+                vw.write(f)
+                backlog_buf.append(f)
+            for f in backlog_buf:  # Refill backlog
+                backlog.put(f)
             back_pad = 0
+            end_time = v.time_read
             while back_pad < pad:
                 back_pad += 1
                 s, f = v.read()
@@ -133,14 +142,22 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
                 backlog.put(f)
                 if has_significant_change(f, last_frame):  # We're not done yet. Extend the clip
                     back_pad = 0
+                    end_time = v.time_read
                 last_frame = f
             vw.release()
             frames_count = v.frames_read - start_frame_idx
-            duration2 = timedelta(seconds=frames_count / v.target_fps)
+            # duration2 = timedelta(seconds=frames_count / v.target_fps)
             duration = v.time_read - start_offset
-            new_filename = filename.with_name(f"{filename.stem}-d{int(duration.total_seconds()*100):06}.avi")
-            shutil.move(filename, new_filename)
-            bar.write(f"  ==> T+{str(start_offset + duration)} [frame {v.frames_read}]: Created {str(duration)} [{frames_count} frames] long clip ({str(t)} until {str(t + duration)}): {new_filename.name}")
+            significant_frame_length = end_time - timestamp_indicator
+            if significant_frame_length < MIN_SIGNIFICANT_FRAME_LENGTH:
+                bar.write(
+                    f"  ==> Clip ({significant_frame_length.total_seconds():.2}s) has less than {MIN_SIGNIFICANT_FRAME_LENGTH.total_seconds():.2}s significant frames and will be omitted")
+                filename.unlink()
+            else:
+                new_filename = filename.with_name(f"{filename.stem}-d{int(duration.total_seconds() * 100):06}.avi")
+                shutil.move(filename, new_filename)
+                bar.write(
+                    f"  ==> T+{str(start_offset + duration)} [frame {v.frames_read}]: Created {str(duration)} [{frames_count} frames] long clip ({str(t)} until {str(t + duration)}): {new_filename.name}")
 
 
 
