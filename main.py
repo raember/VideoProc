@@ -106,7 +106,7 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
                 duration -= start_timestamp
                 duration -= queue_padding_in_seconds
                 bar.write(
-                    f"  ==> Found a clip with the same timestamp ({duration.total_seconds():.2}s). Assuming it is from a previous run. Skipping {duration.total_seconds():.2}s.")
+                    f"  ==> Found a clip with the same timestamp ({duration.total_seconds():.2f}s). Assuming it is from a previous run. Skipping {duration.total_seconds():.2f}s.")
                 s, count, frames = v.skip(duration, pad)
                 for f in frames:  # Refill backlog
                     if backlog.full():
@@ -151,7 +151,7 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
             significant_frame_length = end_time - timestamp_indicator
             if significant_frame_length < MIN_SIGNIFICANT_FRAME_LENGTH:
                 bar.write(
-                    f"  ==> Clip ({significant_frame_length.total_seconds():.2}s) has less than {MIN_SIGNIFICANT_FRAME_LENGTH.total_seconds():.2}s significant frames and will be omitted")
+                    f"  ==> Clip ({significant_frame_length.total_seconds():.2f}s) has less than {MIN_SIGNIFICANT_FRAME_LENGTH.total_seconds():.2f}s significant frames and will be omitted")
                 filename.unlink()
             else:
                 new_filename = filename.with_name(f"{filename.stem}-d{int(duration.total_seconds() * 100):06}.avi")
@@ -176,3 +176,6 @@ if __name__ == '__main__':
         #         frames.append(f)
         print(f.name, str(date), bed)
         find_changes(cap, AUTO_CUT, date, bed, fps)
+        print("=== DONE ===")
+        shutil.move(f, f.with_suffix(f"{f.suffix}.bak"))
+        break
