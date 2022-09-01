@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 
 import cv2
 import numpy as np
@@ -96,7 +97,7 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
             if filename.exists():
                 bar.write("  ==> Found an unfinished clip. Overwriting it.")
                 filename.unlink()
-            files = list(filename.parent.glob(f"{filename.stem}-*.avi"))
+            files = list(filename.parent.glob(f"{filename.stem}-*.ogv"))
             if len(files) > 1:
                 raise Exception(f"Found too many clips with the same timestamp: {files}")
             elif len(files) == 1:
@@ -153,11 +154,21 @@ def find_changes(vcap: cv2.VideoCapture, out_folder: Path, date: datetime, bed: 
                 bar.write(
                     f"  ==> Clip ({significant_frame_length.total_seconds():.2f}s) has less than {MIN_SIGNIFICANT_FRAME_LENGTH.total_seconds():.2f}s significant frames and will be omitted")
                 filename.unlink()
-            else:
-                new_filename = filename.with_name(f"{filename.stem}-d{int(duration.total_seconds() * 100):06}.avi")
-                shutil.move(filename, new_filename)
-                bar.write(
-                    f"  ==> T+{str(start_offset + duration)} [frame {v.frames_read}]: Created {str(duration)} [{frames_count} frames] long clip ({str(t)} until {str(t + duration)}): {new_filename.name}")
+                continue
+            new_filename = filename.with_name(f"{filename.stem}-d{int(duration.total_seconds() * 100):06}.avi")
+            shutil.move(filename, new_filename)
+            ogv_filename = new_filename.with_suffix(".ogv")
+            retval = subprocess.call(['ffmpeg', '-i', str(new_filename), str(ogv_filename), '-y'],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if retval != 0:
+                bar.write("  ==> Failed to convert clip into Vorbis (OGV) format")
+                continue
+            bar.write("  ==> Converted clip into Vorbis (OGV) format")
+            new_filename.unlink()
+            bar.write("  ==> Deleted original clip")
+            new_filename = ogv_filename
+            bar.write(
+                f"  ==> T+{str(start_offset + duration)} [frame {v.frames_read}]: Created {str(duration)} [{frames_count} frames] long clip ({str(t)} until {str(t + duration)}): {new_filename.name}")
 
 
 
